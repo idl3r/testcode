@@ -334,9 +334,41 @@ int main(int argc, char **argv)
 		}
 	}
 
-	sleep(10);
+	// sleep(10);
+
+	for (i = 0; i < NR_PIPES; i++) {
+		fprintf(stderr, "join read thread %d...\n", i);
+		pthread_join(pipe_read_threads[i], &thread_retval);
+		fprintf(stderr, "done\n");
+	}
+
 	kill_switch = 1;
+	fprintf(stderr, "kill others\n");
+	fprintf(stderr, "join mmap thread...\n");
 	pthread_join(mmap_thread, &thread_retval);
+	fprintf(stderr, "done\n");
+	// for (i = 0; i < NR_PIPES; i++) {
+	// 	fprintf(stderr, "join write thread %d...\n", i);
+	// 	pthread_join(pipe_write_threads[i], &thread_retval);
+	// 	fprintf(stderr, "done\n");
+	// }
+
+	for (i = 0; i < NR_PIPES; i++) {
+		for(;;) {
+			if (close(pipes[i].fd[0])) {
+				perror("close write pipe failed");
+				continue;
+			}
+
+			if (close(pipes[i].fd[1])) {
+				perror("close read pipe failed");
+				continue;
+			}
+			break;
+		}
+	}
+
+	exit(0);
 
 	return 0;
 }
