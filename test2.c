@@ -134,14 +134,6 @@ static inline void init_sock()
 	msg_iovecs[257].iov_len = 4;
 }
 
-void *PrintHello(void *threadid)
-{
-	long tid;
-	tid = (long)threadid;
-	printf("Hello World! It's me, thread #%ld!\n", tid);
-	pthread_exit(NULL);
-}
-
 void *sendmmsg_thread_func(void *p)
 {
 	int sockfd;
